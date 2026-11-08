@@ -1,0 +1,20 @@
+## Interface: 16001, 11509
+## Title: |cffffcc66CatXP|r =^.^=
+## Notes: A tiny cat-themed XP per hour tracker with graphs, a leaderboard and thousands of cat facts. Type /catxp for commands.
+## Author: Carmine
+## Version: 3.1.1
+## IconTexture: Interface\AddOns\CatXP\Media\cat_housecat.tga
+## SavedVariables: CatXPDB
+## SavedVariablesPerCharacter: CatXPCharDB
+## AddonCompartmentFunc: CatXP_OnCompartmentClick
+## AddonCompartmentFuncOnEnter: CatXP_OnCompartmentEnter
+## AddonCompartmentFuncOnLeave: CatXP_OnCompartmentLeave
+
+Core.lua
+FactBank.lua
+Facts.lua
+Charts.lua
+Roster.lua
+UI.lua
+Graphs.lua
+Board.lua

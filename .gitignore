@@ -1,0 +1,8 @@
+# release zips are attached to GitHub Releases, not committed
+*.zip
+__pycache__/
+*.pyc
+venv/
+.venv/
+Thumbs.db
+.DS_Store
