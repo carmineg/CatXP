@@ -5,7 +5,7 @@
   Also loads on Classic Era (11509); every API used here exists on both.
 
   Files
-    Core.lua    tiers, tracking math, events, saved variables, slash commands
+    Core.lua    tiers, tracking math, chat pace, gold, events, saved variables, slash commands
     Charts.lua  small drawing module: bars, lines, markers, hover tooltips
     UI.lua      on-screen frame, tooltip, right-click menu, details panel
     Graphs.lua  the Graphs window: session line, levels, zones, past sessions
@@ -29,13 +29,17 @@ CatXP.VERSION = (GetMeta and GetMeta(ADDON_NAME, "Version")) or "dev"
 local WARMUP_SECS  = 60   -- rate and tier read "warming up" for the first minute of a session
 local RECENT_MINS  = 15   -- the "recent" rate looks at the last 15 active minutes
 local RECENT_KILLS = 10   -- kills-to-level uses the average XP of the last N kills
-local ANNOUNCE_GAP = 60   -- minimum seconds between tier messages, up or down
+local DEFAULT_PACE = 5    -- minutes between automatic chat lines (a new cat, a new leader); /catxp pace
+local SETTLE_SECS  = 300  -- a session younger than this (or than the pace, if shorter) is not announced yet
 local DEMOTION_MARGIN = 300   -- xp/h below a cat's floor before a slip counts as a demotion
 local MAX_TICK     = 120  -- a single clock tick never adds more than this many seconds
 local MAX_HISTORY  = 40   -- finished sessions kept per character
 local MIN_SESSION  = 60   -- sessions shorter than this are not archived on reset
-local GROUP_GAP    = 60   -- party, raid or instance chat gets at most one automatic CatXP line a minute
+local GROUP_GAP    = 60   -- two lines to party, raid or instance chat never come closer than this, races aside
 local HOUR_MINS    = 60   -- the "last hour" rate window
+local QUEST_WINDOW = 2    -- seconds around a quest turn-in in which a rise in your money is its reward
+local SHOP_GRACE   = 2    -- seconds after a vendor, mailbox, auction or trade window closes that still belong to it
+local ITEM_WAIT    = 30   -- seconds a picked-up item may wait for the client to load its vendor price
 CatXP.WARMUP_SECS = WARMUP_SECS
 
 ---------------------------------------------------------------------------
@@ -152,6 +156,25 @@ function ns.fmtTime(secs)
   return string.format("%ds", s)
 end
 
+-- Copper as coins: 124050 -> "12g 40s", 4012 -> "40s 12c", 7 -> "7c". Coloured like the game's
+-- coins unless `plain` is set.
+function ns.fmtMoney(copper, plain)
+  copper = math.floor((tonumber(copper) or 0) + 0.5)
+  if copper < 0 then copper = 0 end
+  local g = math.floor(copper / 10000)
+  local s = math.floor((copper % 10000) / 100)
+  local c = copper % 100
+  local function coin(text, hex)
+    return plain and text or ns.color(hex, text)
+  end
+  if g > 0 then
+    return coin(ns.fmtNum(g) .. "g", "ffd100") .. " " .. coin(string.format("%02ds", s), "c7c7cf")
+  elseif s > 0 then
+    return coin(s .. "s", "c7c7cf") .. " " .. coin(string.format("%02dc", c), "eda55f")
+  end
+  return coin(c .. "c", "eda55f")
+end
+
 -- Turn a Blizzard format string ("%s dies, you gain %d experience.") into a Lua pattern.
 function ns.formatToPattern(fmt)
   fmt = fmt:gsub("%%(%d+)%$", "%%")                               -- "%1$s" -> "%s"
@@ -182,6 +205,8 @@ local DEFAULT_SETTINGS = {
   shareGroup = true,      -- leaderboard: share your numbers with your party or raid
   shareGuild = true,      -- leaderboard: share your numbers with your guild
   leadAnnounce = true,    -- leaderboard: say when the lead changes hands
+  chatPace = DEFAULT_PACE, -- minutes between automatic chat lines, in your chat or the group's
+  goldTrack = false,      -- opt-in: raw gold per hour (looted coin, quest coin, vendor price of pickups)
 }
 
 local function newSession()
@@ -197,6 +222,8 @@ local function newSession()
     levelUps = 0,
     zones = {},         -- [zone name] = { xp, secs, kills }
     marks = {},         -- level-ups: { m = active minute, level = new level }
+    -- With gold tracking on, three more fields appear on first use: gold = { loot, quest, items }
+    -- in copper, goldBuckets = copper per active minute, goldSecs = seconds gold was counted.
   }
 end
 
@@ -428,7 +455,7 @@ function CatXP:AddXP(gained, level)
   s.buckets[idx] = (s.buckets[idx] or 0) + gained
   local zone = self:ZoneRecord(true)
   if zone then zone.xp = zone.xp + gained end
-  self:CheckTier()
+  self:CheckTier(true)
 end
 
 function CatXP:AddKill(amount)
@@ -462,12 +489,19 @@ function CatXP:Accrue()
   if rec then rec.secs = rec.secs + dt end
   local zone = self:ZoneRecord(true)
   if zone then zone.secs = zone.secs + dt end
+  if self.settings.goldTrack then   -- gold has its own clock: only the time it was being counted
+    local s = self.session
+    s.goldSecs = (s.goldSecs or 0) + dt
+    today.goldSecs = (today.goldSecs or 0) + dt
+    if rec then rec.goldSecs = (rec.goldSecs or 0) + dt end
+  end
 end
 
 function CatXP:Tick()
   self:Accrue()
   self:CheckTier()
   self:FlushGroupSay()
+  self:RetryItemValues()
   self:Refresh()
 end
 
@@ -481,6 +515,248 @@ function CatXP:StopTicker()
     self.ticker:Cancel()
     self.ticker = nil
   end
+end
+
+---------------------------------------------------------------------------
+-- Gold (opt-in, /catxp gold): what the play earns per hour, in copper, from three sources.
+--   loot   coin picked up from corpses and chests: any rise in your money that is not a quest
+--          reward and does not happen at a vendor, the mailbox, the auction house or in a trade
+--   quest  coin paid by a quest turn-in
+--   items  what a vendor pays for each item you pick up, loot and quest rewards alike. It is
+--          counted when the item lands in your bags, so selling it later is not counted twice
+-- Money you spend is ignored: this is the raw income, not the change in your purse.
+---------------------------------------------------------------------------
+local GOLD_EVENTS = {
+  "PLAYER_MONEY", "CHAT_MSG_LOOT", "QUEST_TURNED_IN", "GET_ITEM_INFO_RECEIVED",
+  "MERCHANT_SHOW", "MERCHANT_CLOSED", "MAIL_SHOW", "MAIL_CLOSED",
+  "TRADE_SHOW", "TRADE_CLOSED", "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED",
+  "GUILDBANKFRAME_OPENED", "GUILDBANKFRAME_CLOSED",   -- not in every client; registered under pcall
+}
+
+local function readMoney()
+  local m = GetMoney and GetMoney() or nil
+  if isSecret(m) or type(m) ~= "number" then return nil end
+  return m
+end
+
+function CatXP:GoldOn()
+  return self.settings.goldTrack == true
+end
+
+-- The gold events are only listened to while the option is on.
+function CatXP:ApplyGoldEvents()
+  local on = self:GoldOn()
+  for _, e in ipairs(GOLD_EVENTS) do
+    if on then pcall(self.RegisterEvent, self, e) else pcall(self.UnregisterEvent, self, e) end
+  end
+end
+
+-- Remember the purse as it is now, so only what comes in from here on is counted.
+function CatXP:GoldBaseline()
+  self.lastMoney = readMoney()
+  self.goldShops, self.goldShopClosedAt = nil, nil
+  self.questTurnedAt, self.lastCoin = nil, nil
+end
+
+function CatXP:SetGoldTracking(on)
+  self.settings.goldTrack = on and true or false
+  self:ApplyGoldEvents()
+  self:GoldBaseline()
+  if ns.ApplySettings then ns.ApplySettings() end
+  self:Refresh()
+end
+
+-- Book income. Like XP, it starts the clock if auto-start allows it (at level 60 it is the only
+-- thing that can), and is ignored while you have paused the session yourself.
+function CatXP:AddGold(copper, source)
+  copper = math.floor((tonumber(copper) or 0) + 0.5)
+  if copper <= 0 or not self:GoldOn() then return false end
+  if not self:IsRunning() then
+    if self:AutoStartAllowed() then self:Start("gold") else return false end
+  end
+  local s = self.session
+  s.gold = s.gold or { loot = 0, quest = 0, items = 0 }
+  s.gold[source] = (s.gold[source] or 0) + copper
+  s.goldBuckets = s.goldBuckets or {}     -- copper per active minute, like the XP buckets
+  local idx = math.floor(s.secs / 60) + 1
+  s.goldBuckets[idx] = (s.goldBuckets[idx] or 0) + copper
+  local today = self:TodayRecord()
+  today.gold = (today.gold or 0) + copper
+  local rec = self:LevelRecord(self.lastLevel, true)
+  if rec then rec.gold = (rec.gold or 0) + copper end
+  self:Refresh()
+  return true
+end
+
+-- A vendor, mailbox, auction or trade window is open, or closed a moment ago: money and items
+-- that arrive now were sold, bought, mailed or traded, not earned in the field.
+function CatXP:GoldShopOpen()
+  if self.goldShops and next(self.goldShops) then return true end
+  return self.goldShopClosedAt ~= nil and GetTime() - self.goldShopClosedAt < SHOP_GRACE
+end
+
+function CatXP:SetGoldShop(which, open)
+  self.goldShops = self.goldShops or {}
+  if open then
+    self.goldShops[which] = true
+  elseif self.goldShops[which] then
+    self.goldShops[which] = nil
+    self.goldShopClosedAt = GetTime()
+  end
+end
+
+-- PLAYER_MONEY: any rise in the purse outside those windows is income.
+function CatXP:OnMoney()
+  local money = readMoney()
+  if not money then return end
+  local last = self.lastMoney
+  self.lastMoney = money
+  if not last or not self:GoldOn() then return end
+  local delta = money - last
+  if delta <= 0 or self:GoldShopOpen() then return end
+  local now = GetTime()
+  if self.questTurnedAt and now - self.questTurnedAt <= QUEST_WINDOW then
+    self:AddGold(delta, "quest")
+  elseif self:AddGold(delta, "loot") then
+    self.lastCoin = { amount = delta, at = now }
+  end
+end
+
+-- QUEST_TURNED_IN: the reward coin arrives just after this event, or just before it. Either way
+-- it is booked as quest coin, not loot.
+function CatXP:OnQuestTurnedIn()
+  if not self:GoldOn() then return end
+  local now = GetTime()
+  self.questTurnedAt = now
+  local c = self.lastCoin
+  self.lastCoin = nil
+  if c and now - c.at <= QUEST_WINDOW then
+    local g = self.session.gold
+    if g and (g.loot or 0) >= c.amount then
+      g.loot = g.loot - c.amount
+      g.quest = (g.quest or 0) + c.amount
+      self:Refresh()
+    end
+  end
+end
+
+-- CHAT_MSG_LOOT tells which items landed in your own bags. Such a line is recognised by how the
+-- game's own format strings begin ("You receive loot: ", "You receive item: "), so other
+-- players' loot and the things you craft are left out, in any language.
+function CatXP:BuildLootPrefixes()
+  self.lootPrefixes = {}
+  for _, name in ipairs({ "LOOT_ITEM_SELF", "LOOT_ITEM_SELF_MULTIPLE", "LOOT_ITEM_PUSHED_SELF", "LOOT_ITEM_PUSHED_SELF_MULTIPLE" }) do
+    local fmt = _G[name]
+    if type(fmt) == "string" then
+      local prefix = fmt:match("^(.-)%%[%d%$]*s")
+      if prefix and prefix ~= "" then self.lootPrefixes[prefix] = true end
+    end
+  end
+  if not next(self.lootPrefixes) then
+    self.lootPrefixes["You receive loot: "] = true
+    self.lootPrefixes["You receive item: "] = true
+  end
+end
+
+function CatXP:OnLootMessage(text)
+  if not self:GoldOn() or type(text) ~= "string" or isSecret(text) then return end
+  if self:GoldShopOpen() then return end   -- bought, mailed or traded, not picked up
+  -- pcall: in chat-restricted zones the text may be unreadable; never let that break the addon.
+  local ok, item, count = pcall(function()
+    local mine = false
+    for prefix in pairs(self.lootPrefixes or {}) do
+      if text:sub(1, #prefix) == prefix then mine = true; break end
+    end
+    if not mine then return nil end
+    local itemString = text:match("|H(item:[^|]+)|h")
+    if not itemString then return nil end
+    return itemString, tonumber(text:match("|h|rx(%d+)") or text:match("|hx(%d+)")) or 1
+  end)
+  if not ok or not item then return end
+  self:AddItemValue(item, count or 1)
+end
+
+-- What a vendor pays for one of these; nil while the client has not loaded the item yet.
+local function sellPriceOf(itemString)
+  local get = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+  if not get then return 0 end
+  local ok, name, _, _, _, _, _, _, _, _, _, price = pcall(get, itemString)
+  if not ok then return 0 end
+  if name == nil then return nil end
+  if isSecret(price) or type(price) ~= "number" then return 0 end
+  return price
+end
+
+function CatXP:AddItemValue(itemString, count)
+  -- paused by hand: not counted now, and not later when its price turns up
+  if not self:IsRunning() and not self:AutoStartAllowed() then return end
+  local price = sellPriceOf(itemString)
+  if price == nil then
+    self.goldPending = self.goldPending or {}
+    if #self.goldPending < 40 then
+      table.insert(self.goldPending, { item = itemString, count = count, at = GetTime() })
+    end
+    return
+  end
+  if price > 0 then self:AddGold(price * count, "items") end
+end
+
+-- Items whose price was not loaded when they dropped: look again, give up after ITEM_WAIT.
+function CatXP:RetryItemValues()
+  local q = self.goldPending
+  if not q or #q == 0 then return end
+  local now = GetTime()
+  for i = #q, 1, -1 do
+    local e = q[i]
+    local price = sellPriceOf(e.item)
+    if price ~= nil then
+      table.remove(q, i)
+      if price > 0 then self:AddGold(price * e.count, "items") end
+    elseif now - e.at > ITEM_WAIT then
+      table.remove(q, i)
+    end
+  end
+end
+
+-- Copper and counted seconds in the last `minutes` active minutes of the session.
+function CatXP:RecentGold(minutes)
+  local s = self.session
+  local b = s.goldBuckets
+  if not b or s.secs < 1 then return 0, 0 end
+  local idx = math.floor(s.secs / 60) + 1
+  local sum = 0
+  for i = math.max(1, idx - minutes + 1), idx do sum = sum + (b[i] or 0) end
+  local window = math.min(s.secs, (s.secs % 60) + (minutes - 1) * 60)
+  return sum, math.min(window, s.goldSecs or 0)
+end
+
+-- Everything the UI shows about gold, or nil while the option is off. `windows` mirrors the XP
+-- rate windows: last 15 minutes, last hour, session, this level, today.
+function CatXP:GoldStats()
+  if not self:GoldOn() then return nil end
+  local s = self.session
+  local g = s.gold or {}
+  local total = (g.loot or 0) + (g.quest or 0) + (g.items or 0)
+  local secs = s.goldSecs or 0
+  local function span(key, name, gold, t)
+    gold, t = gold or 0, t or 0
+    return { key = key, name = name, gold = gold, secs = t, rate = t > 0 and (gold / t * 3600) or 0, ready = t >= WARMUP_SECS }
+  end
+  local rec = self.db.levels[self.lastLevel or 0]
+  local today = self:TodayRecord()
+  local gold15, secs15 = self:RecentGold(RECENT_MINS)
+  local gold60, secs60 = self:RecentGold(HOUR_MINS)
+  return {
+    total = total, loot = g.loot or 0, quest = g.quest or 0, items = g.items or 0,
+    secs = secs, rate = secs > 0 and (total / secs * 3600) or 0, ready = secs >= WARMUP_SECS,
+    windows = {
+      span("recent", "Last 15 min", gold15, secs15),
+      span("hour", "Last hour", gold60, secs60),
+      span("session", "Session", total, secs),
+      span("level", "This level", rec and rec.gold, rec and rec.goldSecs),
+      span("today", "Today", today.gold, today.goldSecs),
+    },
+  }
 end
 
 ---------------------------------------------------------------------------
@@ -504,6 +780,8 @@ function CatXP:Start(reason)
   self:Refresh()
   if reason == "auto" then
     self:Print("XP spotted! Tracking started.")
+  elseif reason == "gold" then
+    self:Print("Gold spotted! Tracking started.")
   elseif reason ~= "silent" then
     self:Print("Tracking started. Go get them, kitty.")
   end
@@ -537,6 +815,10 @@ function CatXP:ArchiveSession()
     startedAt = s.startedAt, endedAt = time(), secs = s.secs, xp = s.xp, kills = s.kills,
     startLevel = s.startLevel, endLevel = self.lastLevel, levelUps = s.levelUps or 0,
   }
+  if s.gold then
+    entry.gold = (s.gold.loot or 0) + (s.gold.quest or 0) + (s.gold.items or 0)
+    entry.goldSecs = s.goldSecs or 0
+  end
   table.insert(self.db.history, entry)
   while #self.db.history > MAX_HISTORY do table.remove(self.db.history, 1) end
   if ns.Board then ns.Board:NoteSession(entry) end
@@ -552,7 +834,6 @@ function CatXP:Reset(silent)
   self.session = self.db.session
   self.db.manualPause = nil
   self.tierIndex = nil
-  self.lastAnnounce = nil
   if wasRunning then
     self.session.startedAt = time()
     self.session.startLevel = self.lastLevel
@@ -756,19 +1037,62 @@ function CatXP:GetStats()
     rested = rested, startedAt = s.startedAt, startLevel = s.startLevel, levelUps = s.levelUps or 0,
     zone = self.zone,
     windows = self:Windows(),
+    gold = self:GoldStats(),
   }
 end
 
-function CatXP:CheckTier()
+function ns.paceText(minutes)
+  minutes = math.floor((tonumber(minutes) or DEFAULT_PACE) + 0.5)
+  return minutes == 1 and "minute" or (minutes .. " minutes")
+end
+
+-- Seconds between automatic chat lines: the pace set with /catxp pace, in minutes.
+function CatXP:PaceSecs()
+  local m = tonumber(self.settings.chatPace) or DEFAULT_PACE
+  if m < 1 then m = 1 elseif m > 60 then m = 60 end
+  return m * 60
+end
+
+-- A rate younger than this still jumps with every kill, so it is not news yet: the pace, but
+-- never more than SETTLE_SECS.
+function CatXP:SettleSecs()
+  return math.min(self:PaceSecs(), SETTLE_SECS)
+end
+
+-- The automatic lines (a new cat, a new leader) share one slot: CatXP says at most one of them
+-- per pace, in your chat or the group's, and keeps GROUP_GAP away from any other line it sent
+-- to the group. News that comes too soon is not queued. The check simply runs again later and
+-- tells whatever is true by then, so a change that undid itself is never mentioned.
+function CatXP:AutoLineDue()
+  local now = GetTime()
+  if self.lastAutoLine and now - self.lastAutoLine < self:PaceSecs() then return false end
+  if self.lastGroupSay and now - self.lastGroupSay < GROUP_GAP then return false end
+  return true
+end
+
+function CatXP:NoteAutoLine()
+  self.lastAutoLine = GetTime()
+end
+
+-- `fromXP` is set when XP has just come in. The clock calls this too, every second, but only
+-- to keep the current cat up to date.
+function CatXP:CheckTier(fromXP)
   local s = self.session
   if not self:IsRunning() or s.secs < WARMUP_SECS then return end
   local rate = self:SessionRate()
   local tier, idx = self:TierFor(rate)
   self.tierIndex = idx
-  -- Chat hears about a cat when the session moves to a different one than it last announced:
-  -- up ("reached" the first time, "back to" after a slip) or down ("slipped", with the sad
-  -- line). A slip only counts once the rate is DEMOTION_MARGIN below the announced cat's floor,
-  -- so a rate wobbling on a boundary stays quiet, and no two messages come within ANNOUNCE_GAP.
+  -- Chat hears about a cat when the session has moved to a different one than it last
+  -- announced: up ("reached" the first time, "back to" after a slip) or down ("slipped", with
+  -- the sad line). To keep that from turning into noise:
+  --   * it is only looked at when XP comes in, so a rate sliding while you travel, trade or
+  --     sit at a vendor says nothing. The slide is told once, in one line, when you play again;
+  --   * a session that has not settled yet (SettleSecs) is not news, its rate still jumps with
+  --     every kill;
+  --   * a slip only counts once the rate is DEMOTION_MARGIN below the announced cat's floor;
+  --   * and the line waits for its turn (AutoLineDue) without being queued, so only the latest
+  --     cat is ever told and a cat you left and came back to is not mentioned at all.
+  if not fromXP then return end
   local S = self.settings
   local announced = s.announcedTier or 1
   local direction
@@ -784,21 +1108,22 @@ function CatXP:CheckTier()
     if idx > best then s.bestTier = idx end
     return
   end
-  local now = GetTime()
-  if self.lastAnnounce and now - self.lastAnnounce < ANNOUNCE_GAP then return end
-  self.lastAnnounce = now
+  if s.secs < self:SettleSecs() or not self:AutoLineDue() then return end
+  self:NoteAutoLine()
   s.announcedTier = idx
   local record = idx > best
   if record then s.bestTier = idx end
-  local factLine = ns.FactLine and ns.FactLine(tier) or ""   -- the same fact for you and for the group
-  if S.announceTiers then
+  local factLine = ns.FactLine and ns.FactLine(tier) or ""
+  -- In a group the line goes to the group, where you read it yourself. Your own chat frame gets
+  -- it only when nobody else did (solo, or party announcements off): never both.
+  local told = S.partyAnnounce and self:AnnounceToGroup(tier, rate, direction, record, factLine)
+  if S.announceTiers and not told then
     if direction == "up" then
       self:Print(string.format("Promoted to %s at %s xp/h. %s%s", self:TierName(tier, true), ns.fmtShort(rate), tier.quip, factLine))
     else
       self:Print(string.format("Demoted to %s at %s xp/h. %s%s", self:TierName(tier, true), ns.fmtShort(rate), tier.sad or tier.quip, factLine))
     end
   end
-  if S.partyAnnounce then self:AnnounceToGroup(tier, rate, direction, record, factLine) end
 end
 
 -- The chat channel of the group the player is in: party, raid or instance. nil when solo.
@@ -811,10 +1136,9 @@ end
 
 -- A plain-text line to party, raid or instance chat. No colour codes or texture escapes: other
 -- clients would not render them and the server may refuse the line. Only while grouped, so solo
--- play never talks to anyone. Automatic lines (tier changes, lead changes) come at least
--- GROUP_GAP apart whatever they are about, so a rate bouncing across a boundary cannot flood the
--- chat: a line that comes too soon waits for the minute to pass, and a newer line takes its
--- place in the queue, so the group hears the latest news and never more than one line a minute.
+-- play never talks to anyone. The automatic lines (a new cat, a new leader) are paced before
+-- they get here, see AutoLineDue. This gate is the last line of defence and keeps any two lines
+-- GROUP_GAP apart: one that still comes too soon waits, and a newer one takes its place.
 -- Race lines are `urgent`: the player asked for the race, so they always go at once. Returns
 -- true when the line was sent.
 function CatXP:GroupSay(msg, urgent)
@@ -844,7 +1168,8 @@ function CatXP:FlushGroupSay()
   self:GroupSay(msg)
 end
 
--- Plain-text tier change for the group, under the name the group sees us by.
+-- Plain-text tier change for the group, under the name the group sees us by. Returns true when
+-- the group got the line.
 function CatXP:AnnounceToGroup(tier, rate, direction, record, factLine)
   local name = (ns.Board and ns.Board.MyName and ns.Board:MyName()) or (UnitName and UnitName("player"))
   if type(name) ~= "string" or isSecret(name) or name == "" then name = "Someone" end
@@ -854,7 +1179,7 @@ function CatXP:AnnounceToGroup(tier, rate, direction, record, factLine)
   elseif not record then
     verb = "is back to"
   end
-  self:GroupSay(string.format("CatXP: %s %s %s at %s xp/h. %s%s", name, verb, tier.name, ns.fmtShort(rate), line or "", factLine or ""))
+  return self:GroupSay(string.format("CatXP: %s %s %s at %s xp/h. %s%s", name, verb, tier.name, ns.fmtShort(rate), line or "", factLine or ""))
 end
 
 function CatXP:Refresh()
@@ -903,13 +1228,16 @@ function CatXP:ADDON_LOADED(name)
   self:UnregisterEvent("ADDON_LOADED")
   self:InitDB()
   self:BuildKillPattern()
+  self:BuildLootPrefixes()
   if ns.Board then ns.Board:Init() end
   for _, e in ipairs(EVENTS) do self:RegisterEvent(e) end
+  self:ApplyGoldEvents()
   if ns.BuildUI then ns.BuildUI() end
 end
 
 function CatXP:PLAYER_ENTERING_WORLD(isLogin, isReload)
   self:UpdateZone()
+  self:GoldBaseline()
   if isLogin or isReload or not self.lastLevel then
     self:Snapshot()
   else
@@ -960,6 +1288,22 @@ function CatXP:PLAYER_LOGOUT()
   self:Accrue()
 end
 
+-- gold tracking (these events are only registered while /catxp gold is on)
+function CatXP:PLAYER_MONEY() self:OnMoney() end
+function CatXP:CHAT_MSG_LOOT(text) self:OnLootMessage(text) end
+function CatXP:QUEST_TURNED_IN() self:OnQuestTurnedIn() end
+function CatXP:GET_ITEM_INFO_RECEIVED() self:RetryItemValues() end
+function CatXP:MERCHANT_SHOW() self:SetGoldShop("merchant", true) end
+function CatXP:MERCHANT_CLOSED() self:SetGoldShop("merchant", false) end
+function CatXP:MAIL_SHOW() self:SetGoldShop("mail", true) end
+function CatXP:MAIL_CLOSED() self:SetGoldShop("mail", false) end
+function CatXP:TRADE_SHOW() self:SetGoldShop("trade", true) end
+function CatXP:TRADE_CLOSED() self:SetGoldShop("trade", false) end
+function CatXP:AUCTION_HOUSE_SHOW() self:SetGoldShop("auction", true) end
+function CatXP:AUCTION_HOUSE_CLOSED() self:SetGoldShop("auction", false) end
+function CatXP:GUILDBANKFRAME_OPENED() self:SetGoldShop("guildbank", true) end
+function CatXP:GUILDBANKFRAME_CLOSED() self:SetGoldShop("guildbank", false) end
+
 ---------------------------------------------------------------------------
 -- Slash commands
 ---------------------------------------------------------------------------
@@ -973,6 +1317,12 @@ function CatXP:PrintStatus()
   self:Print(string.format("%s | %s | %s xp in %s | %s xp/h | %s",
     state, self:TierName(st.tier), ns.fmtNum(st.xp), ns.fmtTime(st.secs), ns.fmtShort(st.rate),
     st.ttl and (ns.fmtTime(st.ttl) .. " to level") or "no level estimate yet"))
+  local g = st.gold
+  if g then
+    self:Print(string.format("Gold: %s in %s | %s | coin %s, quests %s, items %s",
+      ns.fmtMoney(g.total), ns.fmtTime(g.secs), g.ready and (ns.fmtMoney(g.rate) .. "/h") or "warming up",
+      ns.fmtMoney(g.loot), ns.fmtMoney(g.quest), ns.fmtMoney(g.items)))
+  end
 end
 
 function CatXP:PrintTiers()
@@ -995,6 +1345,7 @@ function CatXP:PrintHelp()
   self:Print("  /catxp show | hide | lock | unlock  - window")
   self:Print("  /catxp scale <0.5-2.5> | alpha <0.1-1>  - window size and opacity")
   self:Print("  /catxp autostart | announce | party | windows  - toggle options")
+  self:Print("  /catxp pace <minutes>  - how often chat hears from CatXP;  /catxp gold  - gold per hour (opt-in)")
   self:Print("  /catxp fact  - a cat fact, right now")
   self:Print("  /catxp board  - the leaderboard;  /catxp race <minutes> | race stop  - races")
   self:Print("  /catxp shareparty | shareguild | leadmsgs  - leaderboard options;  clearrecords")
@@ -1074,6 +1425,21 @@ function CatXP:SlashCommand(msg)
   elseif cmd == "windows" then
     toggleOption("windowsShown", "Rate windows on the main window")
     if ns.ApplySettings then ns.ApplySettings() end
+  elseif cmd == "pace" or cmd == "quiet" then
+    local n = tonumber(arg)
+    if n and n >= 1 and n <= 60 then
+      S.chatPace = math.floor(n + 0.5)
+      self:Print(string.format("Chat pace set: at most one automatic line every %s.", ns.paceText(S.chatPace)))
+    else
+      self:Print(string.format("Chat pace: at most one automatic line every %s. /catxp pace <1-60> changes it (minutes).",
+        ns.paceText(self:PaceSecs() / 60)))
+    end
+  elseif cmd == "gold" then
+    local on = not self:GoldOn()
+    if arg == "on" then on = true elseif arg == "off" then on = false end
+    self:SetGoldTracking(on)
+    self:Print(on and "Gold tracking on: looted coin, quest coin and the vendor price of everything you pick up, per hour."
+      or "Gold tracking off.")
   elseif cmd == "fact" or cmd == "facts" then
     local fact = ns.CatFact and ns.CatFact(nil)
     if fact then

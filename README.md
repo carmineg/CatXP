@@ -3,7 +3,8 @@
 A tiny, cat-themed XP per hour tracker for **World of Warcraft: Forever**. One small window
 with a cat portrait, five rate windows, a graphs window, a leaderboard with live standings,
 all-time records and races against your friends, and a bank of 2,275 cat facts dealt like a
-shuffled deck, so every announcement ends with a different one. No libraries.
+shuffled deck, so every announcement ends with a different one. Optional gold per hour tracking
+(looted coin, quest coin and the vendor price of what you pick up). No libraries.
 
 - The addon is the [CatXP](CatXP/) folder. Its [README](CatXP/README.md) has the full tour:
   the window, the cats, the commands, the settings and the leaderboard protocol.

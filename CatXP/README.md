@@ -4,7 +4,8 @@ A tiny, cat-themed XP per hour tracker for **World of Warcraft: Forever**. One s
 with a cat portrait, five rate windows and five buttons, a tooltip with the numbers, a
 right-click menu, a details panel, a graphs window with five tabs, and a leaderboard with live
 standings, all-time records and races against your friends. No libraries. Eight Lua files,
-seventeen cats and more than 2,200 cat facts, a different one on every announcement.
+seventeen cats and more than 2,200 cat facts, a different one on every announcement. If you ask
+it to, it also tracks your raw gold per hour.
 
 Your XP/hour rate is ranked as a cat. Faster cat, rarer colour. Each cat has its own portrait,
 shown in the window, the tooltip, the details panel, the chat lines and the Cats tab. The ladder
@@ -27,17 +28,27 @@ everything above 35k.
 | 23k | Ocelot | | | |
 
 Each number is the bottom of that cat's band. The window border and the tier name take the
-tier's colour. Moving to a different cat prints a one-line update in chat with the portrait: a
-promotion with the cat's proud line, or a demotion with its sadder one. A slip only counts once
-the rate is a few hundred xp/h under the old cat's floor, and no two updates come within a
-minute, so a rate hovering on a boundary stays quiet. While you are in a party, raid or instance
-group, the same updates go to that group's chat as plain text ("reached", "is back to" or
-"slipped to"), so your friends can watch you climb and fall. Group chat never gets more than one
-automatic CatXP line a minute, whatever it is about: a tier change or a lead change that comes
-too soon waits for the minute to pass, and a newer line takes its place in the queue, so a rate
-bouncing back and forth cannot flood your party. Race starts and results always go at once.
-`/catxp party` or the menu turns the group messages off; `/catxp announce` controls the ones in
-your own chat.
+tier's colour and follow your rate every second. Chat hears from CatXP far less often. When your
+session has moved to a different cat, CatXP says so in one line: a promotion with the cat's
+proud line, or a demotion with its sadder one. Four rules keep that from turning into noise.
+
+- **One line per pace.** CatXP says at most one automatic line every five minutes, whether it is
+  about a new cat or a new leader on the leaderboard. `/catxp pace 10`, or `Chat pace` in the
+  menu, changes the five to anything from 1 to 60 minutes. News that comes too soon is not
+  queued. When the pace allows a line again, CatXP tells whatever is true by then, so a rate
+  that climbed two cats and came back down is never mentioned at all.
+- **Said once.** In a party, raid or instance group the line goes to that group's chat as plain
+  text ("reached", "is back to" or "slipped to"), where you read it yourself. It is printed in
+  your own chat, with the portrait, only when no group heard it: playing alone, or with party
+  announcements off.
+- **Only while you play.** A rate that slides while you travel, trade or stand at a vendor says
+  nothing. The whole slide is told in one line when XP comes in again.
+- **Not in the first five minutes.** A young session's rate jumps with every kill, so it is not
+  announced until it has settled. A slip also only counts once the rate is a few hundred xp/h
+  under the old cat's floor, so a rate hovering on a boundary stays quiet.
+
+Race starts and results always go at once, because you asked for the race. `/catxp party` or
+the menu turns the group messages off; `/catxp announce` controls the ones in your own chat.
 
 Every announcement ends with a real cat fact, and you never hear the same one twice in a hurry.
 Each of the seventeen cats has its own facts about that species (the cheetah's three-second
@@ -60,8 +71,10 @@ menu) tells you one on demand and shows how far through the deck you are.
 3. Make sure CatXP is ticked in the AddOns list on the character screen.
 
 Upgrading from 1.x, 2.x or 3.0: copy over the old folder and restart the game completely (3.1
-adds a file, which `/reload` will not pick up). From 3.1.0 to a later 3.1 release, copying the
-folder and a `/reload` is enough. Sessions, per-level history and settings carry over.
+adds a file, which `/reload` will not pick up). From 3.1 to a later release, 3.2 included,
+copying the folder and a `/reload` is enough. Sessions, per-level history and settings carry
+over. After the upgrade to 3.2 the chat pace is five minutes and gold tracking is off until you
+turn it on.
 
 The TOC also lists the Classic Era interface number, so the same folder loads on Classic Era.
 
@@ -78,6 +91,7 @@ The TOC also lists the Classic Era interface number, so the same folder loads on
   Session  1h 23m   25.1k xp   17.2k/h   [=] Alley Cat
   Level    2h 40m   41.0k xp   15.4k/h   [=] House Cat
   Today    3h 52m   60.2k xp   15.6k/h   [=] House Cat
+  Gold     1h 23m   14g 20s    10g 26s/h
      Pause    Reset    Details   Graphs    Board
 ```
 
@@ -92,6 +106,8 @@ The TOC also lists the Classic Era interface number, so the same folder loads on
   local midnight, across resets and sessions). A row reads `warming` until it has a minute of
   data. `/catxp windows`, or the menu, hides the rows and shrinks the window back to the four
   lines.
+- **Gold row**: only with gold tracking on (see Gold per hour below): the time gold has been
+  counted, the coin earned this session and the coin per hour.
 - **Buttons**: `Start` / `Pause`, `Reset`, `Details`, `Graphs`, `Board`.
 
 ## Where the controls are
@@ -108,6 +124,8 @@ Every control is reachable more than one way. Pick whichever you like.
 | Leaderboard | `Board` or ctrl-left-click | Show leaderboard | | `/catxp board` |
 | Start a race | Race tab of the leaderboard | | | `/catxp race 30` |
 | Rate windows on or off | | Show rate windows | | `/catxp windows` |
+| How often chat hears from CatXP | | Chat pace | | `/catxp pace 5` |
+| Gold per hour on or off | | Track gold per hour | | `/catxp gold` |
 | A cat fact, right now | | A cat fact, please | | `/catxp fact` |
 | Lock the window | | Lock window | `Lock` | `/catxp lock` |
 | Clear history | | Clear history... | `Clear` | `/catxp clearhistory` |
@@ -124,11 +142,13 @@ Mouse on the window:
 
 - **Hover** for the full breakdown: last-15-minute and last-hour rates, kills and average kill
   XP, quest/other XP, rested XP, zone, this level's time and rate, today's time, XP and rate,
-  the average of finished levels, and the next cat.
+  the average of finished levels, and the next cat. With gold tracking on: coin per hour, coin
+  earned, and how much of it was looted coin, quest coin and item value.
 - **Left-click** opens the details panel. **Shift-left-click** opens the graphs.
   **Ctrl-left-click** opens the leaderboard.
 - **Right-click** opens the menu: start/pause, reset, details, graphs, leaderboard, a cat fact,
-  auto-start, chat and party announcements, rate windows, lock, clear history, hide.
+  auto-start, chat and party announcements, chat pace, rate windows, gold tracking, lock, clear
+  history, hide.
 - **Drag** to move (when unlocked). The graphs and leaderboard windows drag too.
 
 ## How tracking works
@@ -150,6 +170,35 @@ Mouse on the window:
 - Everything is stored per character (`CatXPCharDB`). Window positions, scale and options are
   account-wide (`CatXPDB`).
 
+## Gold per hour
+
+Off until you turn it on with `/catxp gold` or `Track gold per hour` in the menu. It measures
+what your play earns, in three parts:
+
+- **Looted coin**: the coin you pick up from corpses and chests, your share in a group included.
+- **Quest coin**: the coin a quest pays when you hand it in.
+- **Items**: what a vendor would pay for every item that lands in your bags, whether looted,
+  gathered or given as a quest reward, counted the moment you pick it up.
+
+With it on, the main window gets a `Gold` row under the rate windows, the tooltip and the
+details panel show the split between the three parts and the rate over the last 15 minutes, the
+last hour, this level and today, and `/catxp status` adds a gold line. Coin also starts the
+session clock when auto-start is on, so it works at level 60, where no XP is left to start it.
+
+What it leaves out, on purpose:
+
+- Money you spend. This is income, not the change in your purse, so a repair bill or a flight
+  does not lower it.
+- Anything at a vendor, the mailbox, the auction house, a guild bank or in a trade. Selling your
+  loot is not counted, because those items were already counted at vendor price when you picked
+  them up, and auction sales, mail and gifts are not what the play earned.
+- Things you craft or conjure, and other players' loot.
+- Anything while the session is paused or gold tracking is off. Gold has its own clock, so
+  turning it on halfway through a session gives a rate for the time it was on.
+
+Gold stays on your screen. It is not on the leaderboard, not in the messages CatXP sends to other
+copies, and no gold line is ever posted to chat.
+
 ## Details panel
 
 - Session block: start time, active time, XP, XP/hour (with the cat), last 15 minutes,
@@ -157,6 +206,9 @@ Mouse on the window:
 - Chart: XP per 5 minutes over the last active hour, each bar coloured by the cat tier that
   rate would earn. Peak value shown top right.
 - Per-level table: level, time, XP, XP/hour (tier coloured), kills. Current level in green.
+- Gold block, with gold tracking on: coin per hour with the total and the counted time, the
+  split between coin, quests and items, and the rate over the last 15 minutes, the last hour,
+  this level and today. The panel grows to make room.
 - Buttons: Start/Pause, Reset, Graphs, Lock/Unlock, Clear (asks first; clears levels and
   sessions).
 
@@ -223,11 +275,14 @@ it, and the `Party` and `Guild` buttons on the Live tab (or `/catxp shareparty` 
   coloured, your bar brighter. When time is up, the starter posts the results to group chat
   ("CatXP Race over! 1. Jesse 8.2k xp  2. Carmine 7.9k xp") and the tab keeps them until the
   next race. The starter can call a race off with `Stop race` or `/catxp race stop`.
-- **Lead changes**: when someone overtakes the leader of the live board and holds it, the new
-  leader's addon says so in your chat, and in group chat if party announcements are on ("CatXP:
-  Jesse takes the lead from Carmine at 27.3k xp/h"). At most one such message a minute, and a
-  lead that flips straight back is never announced. `Lead msgs` or `/catxp leadmsgs` turns it
-  off; losing the lead always gets you a quiet line of your own.
+- **Lead changes**: when you overtake the leader of the live board and hold it, your copy says
+  so in group chat ("CatXP: Jesse takes the lead from Carmine at 27.3k xp/h"), or in your own
+  chat when no group would hear it. It takes the same turn as the tier lines, so there is at
+  most one automatic line per chat pace, and a lead that flips straight back is never
+  announced. Losing the lead to someone in your group says nothing more, since their copy has
+  just told the group. Losing it to a guildmate outside your group gets you a line of your own.
+  Two other cats trading places is not announced. `Lead msgs` or `/catxp leadmsgs` turns all of
+  it off.
 
 ## Slash commands
 
@@ -244,6 +299,8 @@ it, and the `Party` and `Guild` buttons on the Live tab (or `/catxp shareparty` 
 | `scale <0.5-2.5>`, `alpha <0.1-1>` | Window size and opacity |
 | `autostart`, `announce`, `party` | Toggle the options |
 | `windows` | Show or hide the five rate windows on the main window |
+| `pace <1-60>` | Minutes between automatic chat lines (5 by default); without a number, shows it |
+| `gold`, `gold on`, `gold off` | Gold per hour tracking on or off |
 | `fact` | A cat fact right now, and how far through the deck you are |
 | `shareparty`, `shareguild`, `leadmsgs` | Toggle the leaderboard options |
 | `tiers` | Print the cat ladder |
@@ -291,6 +348,15 @@ that changes the number of facts starts a fresh pass.
   past midnight is split between the two days.
 - A new version with a different number of cat facts starts a fresh pass through the deck, so a
   few facts you have already heard can come round again.
+- Gold: items are valued at vendor price, not at what the auction house would pay, and an item
+  no vendor buys counts as nothing. An item is counted when you pick it up, whatever you do with
+  it afterwards. One the client has not loaded yet is valued as soon as it has, or dropped after
+  30 seconds.
+- Gold: coin that arrives within two seconds of a quest turn-in is filed under quests, so coin
+  looted in that same moment lands there too. The total is right either way.
+- Gold: in zones where the client hides chat text from addons, picked-up items may not be seen
+  there. Coin is read from your purse and is always counted.
+- A group member on CatXP 3.1 or older still posts its own lines at the old one-a-minute pace.
 - The leaderboard knows only players who run CatXP 3.0 or newer with sharing on, in your group
   or guild. Every number comes from that player's own addon, so it is as honest as their clock.
 - Forever shows characters with a longer name in chat than the one the game hands the addon
@@ -302,12 +368,14 @@ that changes the number of facts starts a fresh pass.
 ## Development
 
 The logic can be exercised without the game. `tools/` (one folder up from this addon) holds a
-small mock of the WoW API and four scenario files: `test_catxp.lua` (version 1 behaviour, 109
+small mock of the WoW API and five scenario files: `test_catxp.lua` (version 1 behaviour, 109
 checks), `test_catxp_v2.lua` (zones, history, graphs, buttons, 76 checks), `test_catxp_v3.lua`
 (the leaderboard: addon messages, live rows, records, races, the window, the cat facts and the
-own-echo token, 78 checks) and `test_catxp_v31.lua` (the fact bank and its deck, the rate
-windows and the one-a-minute group chat queue, 47 checks). `tools/build_facts.py` rebuilds
-`FactBank.lua` and needs nothing beyond Python.
+own-echo token, 79 checks), `test_catxp_v31.lua` (the fact bank and its deck, the rate windows
+and the last-resort gap on group chat, 47 checks) and `test_catxp_v32.lua` (the chat pace,
+lines said once and only while you play, lead changes, and gold tracking with its sources,
+exclusions, clock and display, 96 checks). `tools/build_facts.py` rebuilds `FactBank.lua` and
+needs nothing beyond Python.
 They need Python with the `lupa` package, which bundles Lua 5.1, the dialect WoW uses. Drawing
 the cats needs Pillow.
 

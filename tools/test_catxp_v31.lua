@@ -26,6 +26,7 @@ end
 -- 1. load + login -------------------------------------------------------------------------------
 local ns = loadAddon()
 MOCK.fire("ADDON_LOADED", "CatXP")
+CatXP.settings.chatPace = 1   -- these scenarios were written for one automatic line a minute; the default is five
 MOCK.fire("PLAYER_ENTERING_WORLD", true, false)
 check(CatXPMainFrame ~= nil and #CatXPMainFrame.windows == 5, "main window has five rate windows")
 check(CatXPDB.settings.windowsShown == true, "rate windows on by default")
@@ -165,7 +166,7 @@ MOCK.prints = {}
 MOCK.menuClick("A cat fact, please")
 check(printsContain("Cat fact:"), "the menu button tells one")
 
--- 10. party chat: one automatic line a minute, whatever it is about ---------------------------------
+-- 10. party chat: the last-resort gate keeps any two lines a minute apart ----------------------------
 MOCK.inGroup = true
 MOCK.sent = {}
 CatXP.lastGroupSay, CatXP.pendingGroupSay = nil, nil
@@ -177,20 +178,22 @@ MOCK.advance(61)
 check(#MOCK.sent == 3 and MOCK.sent[3].msg == "CatXP: three" and CatXP.pendingGroupSay == nil, "the waiting line goes out when the minute is up, sent " .. #MOCK.sent)
 MOCK.inGroup = false
 check(CatXP:GroupSay("CatXP: solo") == false and #MOCK.sent == 3 and CatXP.pendingGroupSay == nil, "solo: nothing is said to anyone and nothing waits")
--- a promotion right after a lead change: the party hears the lead change now and the promotion a minute later
+-- a promotion right after another line to the party: it is not said yet, here or there, and it
+-- is not queued either. The next XP after the gap tells it once, to the party only.
 MOCK.inGroup = true
 MOCK.sent = {}
-CatXP.lastGroupSay, CatXP.pendingGroupSay = nil, nil
+CatXP.lastGroupSay, CatXP.pendingGroupSay, CatXP.lastAutoLine = nil, nil, nil
 CatXP:GroupSay("CatXP: Tester takes the lead at 20.0k xp/h.")
 CatXP.session.secs, CatXP.session.xp = 600, 600 * 31000 / 3600
-CatXP.session.announcedTier, CatXP.session.bestTier, CatXP.lastAnnounce = 1, 1, nil
+CatXP.session.announcedTier, CatXP.session.bestTier = 1, 1
 MOCK.prints = {}
-CatXP:CheckTier()
-check(printsContain("Promoted to") and #MOCK.sent == 1 and has(CatXP.pendingGroupSay, "Jaguar"), "the promotion is printed here at once and waits its turn for the party, sent " .. #MOCK.sent)
-CatXP:Pause("silent")   -- freeze the rate so nothing newer replaces the waiting line
-MOCK.advance(66)        -- paused, so the five-second leaderboard heartbeat does the sending
-check(#MOCK.sent == 2 and has(MOCK.sent[2].msg, "reached Jaguar") and CatXP.pendingGroupSay == nil, "a minute later the party hears the promotion, got " .. tostring(MOCK.sent[2] and MOCK.sent[2].msg))
-CatXP:Start("silent")
+CatXP:CheckTier(true)
+check(not printsContain("Promoted to") and #MOCK.sent == 1 and CatXP.pendingGroupSay == nil and CatXP.session.announcedTier == 1,
+  "a promotion right after another party line is held back, unsaid and unqueued, sent " .. #MOCK.sent)
+MOCK.now = MOCK.now + 61   -- the clock moves, the session numbers stay as they are
+CatXP:CheckTier(true)
+check(#MOCK.sent == 2 and has(MOCK.sent[2].msg, "reached Jaguar") and not printsContain("Promoted to") and CatXP.pendingGroupSay == nil,
+  "a minute later the next XP tells the party, and only the party, got " .. tostring(MOCK.sent[2] and MOCK.sent[2].msg))
 MOCK.inGroup = false
 
 io.write(string.format("test_catxp_v31: %d checks passed, %d failed\n", passes, #failures))

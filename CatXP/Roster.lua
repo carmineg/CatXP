@@ -24,12 +24,11 @@ local RACE_BROADCAST_EVERY = 10   -- faster while a race is on
 local STALE_AFTER = 90            -- seconds of silence before a cat leaves the live board
 local FORGET_AFTER = 360          -- seconds of silence before a cat is forgotten entirely
 local MIN_RECORD_SECS = 1800      -- a session rate needs 30 minutes to count as a record
-local LEAD_GAP = 60               -- seconds between lead-change messages
 local QUERY_GAP = 10              -- seconds between who-is-there queries
 local SAMPLE_KEEP = 120           -- rate samples kept per cat for the five-minute trend
 local SAMPLE_AGE = 400            -- and no older than this many seconds
 
-local Board = { roster = {}, samples = {}, lastSend = 0, lastQuery = 0, lastLeadAt = 0 }
+local Board = { roster = {}, samples = {}, lastSend = 0, lastQuery = 0 }
 ns.Board = Board
 
 ---------------------------------------------------------------------------
@@ -335,22 +334,33 @@ function Board:CheckLead()
     self.leader = top.key
     return
   end
-  local now = GetTime()
-  -- too soon after the last message: keep the old leader and look again on the next heartbeat,
-  -- so a lead that flips straight back is never announced
-  if now - (self.lastLeadAt or 0) < LEAD_GAP then return end
-  self.lastLeadAt = now
+  -- Who says what. Taking the lead is yours to tell: to the group, or to yourself when nobody
+  -- else would hear it. Losing it is only told here when the new leader is not in your group,
+  -- because a cat in your group announces its own lead there and one line is enough. Any other
+  -- change (two other cats swapping places) just moves the leader quietly.
+  local mine = top.isMe
+  local lostIt = (not mine) and previous == self:Identity().key
+  local theyTellIt = top.source == "party" or top.source == "party+guild"
+  if not mine and (not lostIt or theyTellIt) then
+    self.leader = top.key
+    return
+  end
+  -- Not this line's turn yet, or the new leader's session is too young for its rate to mean
+  -- much: keep the old leader and look again on the next heartbeat. A lead that flips straight
+  -- back is then never announced.
+  if (top.secs or 0) < CatXP:SettleSecs() or not CatXP:AutoLineDue() then return end
+  CatXP:NoteAutoLine()
   self.leader = top.key
   local prevRow
   for _, r in ipairs(rows) do if r.key == previous then prevRow = r end end
   local from = prevRow and (" from " .. prevRow.name) or ""
   local factLine = ns.FactLine and ns.FactLine(top.tier) or ""
-  if top.isMe then
-    CatXP:Print(ns.color("ffcc66", "You take the lead") .. from .. " at " .. ns.fmtShort(top.rate) .. " xp/h. Keep the paws moving." .. factLine)
-    if S.partyAnnounce then   -- shares the one-a-minute gate with the tier lines
-      CatXP:GroupSay(string.format("CatXP: %s takes the lead%s at %s xp/h.%s", top.name, from, ns.fmtShort(top.rate), factLine))
+  if mine then
+    local told = S.partyAnnounce and CatXP:GroupSay(string.format("CatXP: %s takes the lead%s at %s xp/h.%s", top.name, from, ns.fmtShort(top.rate), factLine))
+    if not told then
+      CatXP:Print(ns.color("ffcc66", "You take the lead") .. from .. " at " .. ns.fmtShort(top.rate) .. " xp/h. Keep the paws moving." .. factLine)
     end
-  elseif previous == self:Identity().key then
+  else
     CatXP:Print(string.format("%s takes the lead from you at %s xp/h. Unacceptable.%s", top.name, ns.fmtShort(top.rate), factLine))
   end
 end
@@ -573,6 +583,6 @@ function Board:Heartbeat()
   self:Broadcast()
   if self.race and self.race.active and self:RaceLeft() <= 0 then self:FinishRace(false) end
   self:CheckLead()
-  if CatXP.FlushGroupSay then CatXP:FlushGroupSay() end   -- a party line held back by the one-a-minute gate
+  if CatXP.FlushGroupSay then CatXP:FlushGroupSay() end   -- a party line that had to wait for the gap
   if ns.RefreshBoard then ns.RefreshBoard() end
 end

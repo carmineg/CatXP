@@ -2,7 +2,7 @@
 ## Title: |cffffcc66CatXP|r =^.^=
 ## Notes: A tiny cat-themed XP per hour tracker with graphs, a leaderboard and thousands of cat facts. Type /catxp for commands.
 ## Author: Carmine
-## Version: 3.1.1
+## Version: 3.2.0
 ## IconTexture: Interface\AddOns\CatXP\Media\cat_housecat.tga
 ## SavedVariables: CatXPDB
 ## SavedVariablesPerCharacter: CatXPCharDB

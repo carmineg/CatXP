@@ -26,6 +26,7 @@ end
 MOCK.level, MOCK.xp, MOCK.xpMax = 12, 350, 14000
 local ns = loadAddon()
 MOCK.fire("ADDON_LOADED", "CatXP")
+CatXP.settings.chatPace = 1   -- these scenarios were written for one automatic line a minute; the default is five
 MOCK.fire("PLAYER_ENTERING_WORLD", true, false)
 check(CatXP.zone == "Elwynn Forest", "zone read at login")
 check(CatXPMainFrame.icon.texture == CatXP.TIERS[1].image, "idle portrait is the napping kitten")
@@ -205,13 +206,14 @@ local s = CatXP.session
 local function at(secsLater, rate)
   MOCK.now = MOCK.now + secsLater
   s.xp = rate * s.secs / 3600
-  CatXP:CheckTier()
+  CatXP:CheckTier(true)   -- as when XP has just come in
 end
+MOCK.prints = {}
 at(61, 16200)                       -- Alley Cat
 last = MOCK.sent[#MOCK.sent]
 check(#MOCK.sent == 2 and has(last.msg, "Tester slipped to Alley Cat") and has(last.msg, CatXP.TIERS[5].sad),
   "demotion sent to party with the sad line, got " .. tostring(last.msg))
-check(printsContain("Demoted to"), "demotion printed locally too")
+check(not printsContain("Demoted to"), "the party got the demotion, so it is not repeated in your own chat")
 at(61, 29500)                       -- back up to Leopard
 last = MOCK.sent[#MOCK.sent]
 check(#MOCK.sent == 3 and has(last.msg, "Tester is back to Leopard"), "returning to a known cat is a comeback, not a record")
@@ -220,7 +222,7 @@ check(#MOCK.sent == 3, "a dip inside the margin is not announced")
 at(1, 28500)                        -- clearly under
 check(#MOCK.sent == 4 and has(MOCK.sent[4].msg, "slipped to Puma"), "a real drop is announced once past the margin")
 at(10, 35500)                       -- Nyan Cat, but too soon after the last message
-check(#MOCK.sent == 4, "the one-minute gap holds for party messages")
+check(#MOCK.sent == 4, "the pace holds for party messages")
 SlashCmdList.CATXP("party")
 check(CatXPDB.settings.partyAnnounce == false, "party setting toggled off and saved")
 MOCK.prints = {}

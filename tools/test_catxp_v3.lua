@@ -43,6 +43,7 @@ MOCK.level, MOCK.xp, MOCK.xpMax = 20, 1000, 20000
 MOCK.inGuild = true
 local ns = loadAddon()
 MOCK.fire("ADDON_LOADED", "CatXP")
+CatXP.settings.chatPace = 1   -- these scenarios were written for one automatic line a minute; the default is five
 MOCK.fire("PLAYER_ENTERING_WORLD", true, false)
 check(MOCK.prefixes.CatXP == true, "addon message prefix registered")
 local q = lastAddon("Q")
@@ -95,15 +96,18 @@ MOCK.advance(65)
 check(ns.Board.leader == "Jesse-Realm", "Jesse holds the lead while you are slower")
 MOCK.xp = MOCK.xp + 2000
 MOCK.fire("PLAYER_XP_UPDATE", "player")
-CatXP.lastGroupSay = GetTime()   -- as if a tier line had just gone to the party
+local sentBefore = #MOCK.sent
+MOCK.prints = {}
+CatXP.lastAutoLine = GetTime()   -- as if a new cat had just been announced
 ns.Board:CheckLead()
-check(printsContain("You take the lead"), "lead change printed locally")
-check(has(CatXP.pendingGroupSay, "Tester takes the lead from Jesse"), "the party hears one automatic line a minute, so the lead line waits, pending " .. tostring(CatXP.pendingGroupSay))
-CatXP.lastGroupSay = nil
-CatXP:FlushGroupSay()
+check(#MOCK.sent == sentBefore and ns.Board.leader == "Jesse-Realm" and not has(CatXP.pendingGroupSay, "takes the lead"),
+  "one automatic line per pace: the lead change waits its turn, unsaid and unqueued")
+CatXP.lastAutoLine, CatXP.lastGroupSay = nil, nil   -- the pace has passed
+ns.Board:CheckLead()
 local lead = MOCK.sent[#MOCK.sent]
-check(lead and lead.chan == "PARTY" and has(lead.msg, "Tester takes the lead from Jesse") and has(lead.msg, "Cat fact:") and #lead.msg <= 250,
-  "lead change posted to party with a cat fact once the minute is up, got " .. tostring(lead and lead.msg))
+check(#MOCK.sent == sentBefore + 1 and lead.chan == "PARTY" and has(lead.msg, "Tester takes the lead from Jesse") and has(lead.msg, "Cat fact:") and #lead.msg <= 250,
+  "lead change posted to party with a cat fact once it is due, got " .. tostring(lead and lead.msg))
+check(not printsContain("You take the lead"), "the party line is not repeated in your own chat")
 local n = #MOCK.sent
 ns.Board:CheckLead()
 check(#MOCK.sent == n, "lead message not repeated while the lead holds")
@@ -241,24 +245,32 @@ if not CatXP:IsRunning() then CatXP:Start("silent") end
 MOCK.prints, MOCK.sent = {}, {}
 MOCK.inGroup = true
 CatXP.session.secs, CatXP.session.xp = 600, 600 * 31000 / 3600
-CatXP.session.announcedTier, CatXP.session.bestTier, CatXP.lastAnnounce, CatXP.lastGroupSay = 1, 1, nil, nil
-CatXP:CheckTier()
-local promo = MOCK.prints[#MOCK.prints]
+CatXP.session.announcedTier, CatXP.session.bestTier, CatXP.lastAutoLine, CatXP.lastGroupSay = 1, 1, nil, nil
+CatXP:CheckTier(true)
 local party = MOCK.sent[#MOCK.sent]
-check(promo and has(promo, "Promoted to") and has(promo, "Jaguar") and has(promo, "Cat fact:"), "promotion line carries a cat fact, got " .. tostring(promo))
 check(party and has(party.msg, "reached Jaguar") and has(party.msg, "Cat fact:") and #party.msg <= 250, "party promotion carries a cat fact under the chat limit, got " .. tostring(party and party.msg))
-check(party and promo and promo:match("Cat fact: (.*)$") == party.msg:match("Cat fact: (.*)$"), "you and the party get the same fact")
+check(not printsContain("Promoted to"), "in a group the promotion is said once, to the group, and not again in your own chat")
 local jaguarFact = party and party.msg:match("Cat fact: (.*)$")
 local isJaguar = false
 for _, f in ipairs(CatXP.TIERS[14].facts) do if f == jaguarFact then isJaguar = true end end
 check(isJaguar, "the fact is about the cat you just became")
 
+-- alone, the same news is printed in your own chat, fact and all
+MOCK.inGroup = false
 MOCK.prints = {}
-CatXP.session.announcedTier, CatXP.lastAnnounce, CatXP.lastGroupSay = 14, nil, nil
+CatXP.session.announcedTier, CatXP.session.bestTier, CatXP.lastAutoLine, CatXP.lastGroupSay = 1, 1, nil, nil
+CatXP:CheckTier(true)
+local promo = MOCK.prints[#MOCK.prints]
+check(promo and has(promo, "Promoted to") and has(promo, "Jaguar") and has(promo, "Cat fact:"), "solo promotion line carries a cat fact, got " .. tostring(promo))
+check(#MOCK.sent == 1, "and nothing more is sent to anyone")
+
+MOCK.prints = {}
+CatXP.session.announcedTier, CatXP.lastAutoLine, CatXP.lastGroupSay = 14, nil, nil
 CatXP.session.xp = 600 * 15000 / 3600
-CatXP:CheckTier()
+CatXP:CheckTier(true)
 local demo = MOCK.prints[#MOCK.prints]
 check(demo and has(demo, "Demoted to") and has(demo, "House Cat") and has(demo, "Cat fact:"), "demotion line carries a cat fact, got " .. tostring(demo))
+MOCK.inGroup = true
 
 MOCK.prints = {}
 local lvl = CatXP:LevelRecord(CatXP.lastLevel, true)

@@ -23,6 +23,7 @@ end
 -- 1. load + login -----------------------------------------------------------
 local ns = loadAddon()
 MOCK.fire("ADDON_LOADED", "CatXP")
+CatXP.settings.chatPace = 1   -- these scenarios were written for one automatic line a minute; the default is five
 check(CatXPDB and CatXPDB.settings and CatXPDB.settings.autoStart == true, "defaults applied")
 check(CatXPMainFrame ~= nil, "main frame created")
 check(CatXPDetailsFrame ~= nil and not CatXPDetailsFrame:IsShown(), "details frame created hidden")

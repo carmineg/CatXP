@@ -5,8 +5,59 @@ local M = {
   zone = "Elwynn Forest", shift = false, ctrl = false, inGroup = false, inRaid = false, inGuild = false,
   sent = {}, addonSent = {}, prefixes = {},
   prints = {}, tickers = {}, frames = {}, popups = {}, secretTest = nil, acceptPopups = false,
+  money = 0, items = {},
 }
 _G.MOCK = M
+
+-- Money and items (gold tracking) ---------------------------------------------------
+-- M.items[id] = { name = "Linen Cloth", price = 13 }; cached = false makes the client "not have
+-- it loaded yet", so GetItemInfo returns nothing until the test flips it.
+GetMoney = function() return M.money end
+local function itemInfo(item)
+  local id = type(item) == "number" and item or tonumber(tostring(item):match("item:(%d+)"))
+  local it = id and M.items[id]
+  if not it or it.cached == false then return nil end
+  local link = "|cffffffff|Hitem:" .. id .. "::::::::20:::::|h[" .. it.name .. "]|h|r"
+  return it.name, link, 1, 10, 1, "Trade Goods", "Cloth", 20, "", 132889, it.price
+end
+GetItemInfo = itemInfo
+C_Item = { GetItemInfo = itemInfo }
+LOOT_ITEM_SELF = "You receive loot: %s."
+LOOT_ITEM_SELF_MULTIPLE = "You receive loot: %sx%d."
+LOOT_ITEM_PUSHED_SELF = "You receive item: %s."
+LOOT_ITEM_PUSHED_SELF_MULTIPLE = "You receive item: %sx%d."
+LOOT_ITEM_CREATED_SELF = "You create: %s."
+LOOT_ITEM_CREATED_SELF_MULTIPLE = "You create: %sx%d."
+LOOT_ITEM = "%s receives loot: %s."
+LOOT_ITEM_MULTIPLE = "%s receives loot: %sx%d."
+
+function M.itemLink(id)
+  local it = M.items[id]
+  return "|cffffffff|Hitem:" .. id .. "::::::::20:::::|h[" .. (it and it.name or "Unknown") .. "]|h|r"
+end
+-- coin lands in the purse (negative: it is spent)
+function M.gainMoney(copper)
+  M.money = M.money + copper
+  M.fire("PLAYER_MONEY")
+end
+-- the chat line the game prints for an item. kind: "loot" (default), "item" (quest reward,
+-- vendor purchase, mail), "create" (crafted) or another player's name.
+function M.lootLine(id, count, kind)
+  count = count or 1
+  local link = M.itemLink(id)
+  kind = kind or "loot"
+  local single = { loot = LOOT_ITEM_SELF, item = LOOT_ITEM_PUSHED_SELF, create = LOOT_ITEM_CREATED_SELF }
+  local multiple = { loot = LOOT_ITEM_SELF_MULTIPLE, item = LOOT_ITEM_PUSHED_SELF_MULTIPLE, create = LOOT_ITEM_CREATED_SELF_MULTIPLE }
+  if single[kind] then
+    if count > 1 then return string.format(multiple[kind], link, count) end
+    return string.format(single[kind], link)
+  end
+  if count > 1 then return string.format(LOOT_ITEM_MULTIPLE, kind, link, count) end
+  return string.format(LOOT_ITEM, kind, link)
+end
+function M.loot(id, count, kind)
+  M.fire("CHAT_MSG_LOOT", M.lootLine(id, count, kind))
+end
 
 GetTime = function() return M.now end
 time = function() return M.wall end
@@ -171,12 +222,15 @@ makeGlobals()
 
 -- Menu API -------------------------------------------------------------------
 MenuUtil = {}
-local function newDescription()
-  local d = { elements = {} }
+-- Every element is a description too, as in the game: a button with children is a submenu.
+local function newDescription(d)
+  d = d or {}
+  d.elements = {}
   local function add(kind, text, a, b, data)
     local e = { kind = kind, text = text, a = a, b = b, data = data }
     function e:SetTooltip() end
     function e:SetResponder() end
+    newDescription(e)
     d.elements[#d.elements + 1] = e
     return e
   end
@@ -193,24 +247,37 @@ function MenuUtil.CreateContextMenu(owner, generator)
   M.lastMenu = root
   return root
 end
-function M.menuClick(text)
-  for _, e in ipairs(M.lastMenu.elements) do
-    if e.text == text then
-      if e.kind == "button" then return e.a(e.data) end
-      if e.kind == "checkbox" or e.kind == "radio" then return e.b(e.data) end
-    end
+-- the first element with this text, submenus included
+local function findElement(d, text, kind)
+  for _, e in ipairs(d.elements) do
+    if e.text == text and (not kind or e.kind == kind) then return e end
+    local inner = findElement(e, text, kind)
+    if inner then return inner end
   end
-  error("menu element not found: " .. tostring(text))
+end
+function M.menuClick(text)
+  local e = findElement(M.lastMenu, text)
+  if not e then error("menu element not found: " .. tostring(text)) end
+  if e.kind == "button" then
+    if e.a then return e.a(e.data) end
+    return
+  end
+  if e.kind == "checkbox" or e.kind == "radio" then return e.b(e.data) end
 end
 function M.menuChecked(text)
-  for _, e in ipairs(M.lastMenu.elements) do
-    if e.text == text and e.kind == "checkbox" then return e.a(e.data) end
-  end
-  error("checkbox not found: " .. tostring(text))
+  local e = findElement(M.lastMenu, text, "checkbox") or findElement(M.lastMenu, text, "radio")
+  if not e then error("checkbox or radio not found: " .. tostring(text)) end
+  return e.a(e.data)
 end
 function M.menuHas(text)
-  for _, e in ipairs(M.lastMenu.elements) do if e.text == text then return true end end
-  return false
+  return findElement(M.lastMenu, text) ~= nil
+end
+-- the texts of a submenu's entries, in order
+function M.menuChildren(text)
+  local e = findElement(M.lastMenu, text)
+  local out = {}
+  for _, c in ipairs(e and e.elements or {}) do out[#out + 1] = c.text end
+  return out
 end
 
 -- Driving --------------------------------------------------------------------

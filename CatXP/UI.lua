@@ -1,7 +1,7 @@
 --[[-------------------------------------------------------------------------
-  CatXP UI: the small window with its portrait and control buttons, the
-  tooltip, the right-click menu, and the details panel (session summary,
-  XP bar chart, per-level table).
+  CatXP UI: the small window with its portrait, rate windows, gold row and
+  control buttons, the tooltip, the right-click menu, and the details panel
+  (session summary, XP bar chart, per-level table, gold block).
 ---------------------------------------------------------------------------]]
 
 local ADDON_NAME, ns = ...
@@ -12,7 +12,10 @@ local WINDOW_ROWS, ROW_H = 5, 13          -- the rate windows under the status l
 local WINDOWS_TOP = -70                   -- y of the separator above the first row
 local WINDOWS_H = WINDOW_ROWS * ROW_H + 8 -- how much taller the window is with them shown
 local BUTTONS_Y = -72                     -- the footer buttons, rate windows hidden
+local GOLD_H = 14                         -- the gold row (/catxp gold) adds this much
 local DETAILS_W, DETAILS_H = 340, 494
+local DETAILS_GOLD_H = 76                 -- the gold block at the foot of the details panel
+local PACE_CHOICES = { 1, 2, 3, 5, 10, 15, 30 }   -- minutes, the "Chat pace" submenu
 local CHART_W, CHART_H = 316, 64
 local CHART_BARS, CHART_MINUTES = 12, 5   -- 12 bars of 5 minutes = the last active hour
 local MAX_LEVEL_ROWS = 10
@@ -98,7 +101,17 @@ local function openMenu(owner)
     root:CreateCheckbox("Auto-start on XP gain", function() return S.autoStart == true end, function() toggleSetting("autoStart") end)
     root:CreateCheckbox("Announce tier promotions", function() return S.announceTiers == true end, function() toggleSetting("announceTiers") end)
     root:CreateCheckbox("Announce to party chat", function() return S.partyAnnounce == true end, function() toggleSetting("partyAnnounce") end)
+    -- how often chat hears from CatXP on its own: a submenu of radio buttons
+    local pace = root:CreateButton("Chat pace")
+    if pace and pace.CreateRadio then
+      for _, minutes in ipairs(PACE_CHOICES) do
+        pace:CreateRadio("One line every " .. ns.paceText(minutes),
+          function() return CatXP:PaceSecs() == minutes * 60 end,
+          function() S.chatPace = minutes end, minutes)
+      end
+    end
     root:CreateCheckbox("Show rate windows", function() return S.windowsShown ~= false end, function() toggleSetting("windowsShown") end)
+    root:CreateCheckbox("Track gold per hour", function() return S.goldTrack == true end, function() CatXP:SetGoldTracking(not CatXP:GoldOn()) end)
     root:CreateCheckbox("Lock window", function() return S.locked == true end, function() toggleSetting("locked") end)
     root:CreateDivider()
     root:CreateButton("Clear history...", function() StaticPopup_Show("CATXP_CLEAR_HISTORY") end)
@@ -160,6 +173,23 @@ function ns.FillTooltip(tt)
   local avg = CatXP:LevelAverages()
   if avg then
     tt:AddDoubleLine("Levels done", string.format("%d, avg %s at %s xp/h", avg.count, ns.fmtTime(avg.avgSecs), ns.fmtShort(avg.rate)), L[1], L[2], L[3], R[1], R[2], R[3])
+  end
+  local gold = st.gold
+  if gold then   -- only with /catxp gold
+    tt:AddLine(" ")
+    tt:AddDoubleLine("Gold / hour", gold.ready and ns.fmtMoney(gold.rate) or "warming up", L[1], L[2], L[3], R[1], R[2], R[3])
+    tt:AddDoubleLine("Gold earned", string.format("%s in %s", ns.fmtMoney(gold.total), ns.fmtTime(gold.secs)), L[1], L[2], L[3], R[1], R[2], R[3])
+    tt:AddDoubleLine("Coin / quests / items", string.format("%s / %s / %s", ns.fmtMoney(gold.loot), ns.fmtMoney(gold.quest), ns.fmtMoney(gold.items)), L[1], L[2], L[3], R[1], R[2], R[3])
+    local recent, lastHour, day = gold.windows[1], gold.windows[2], gold.windows[5]
+    if recent.ready then
+      tt:AddDoubleLine("Gold, last 15 min", ns.fmtMoney(recent.rate) .. " / h", L[1], L[2], L[3], R[1], R[2], R[3])
+    end
+    if lastHour.ready then
+      tt:AddDoubleLine("Gold, last hour", ns.fmtMoney(lastHour.rate) .. " / h", L[1], L[2], L[3], R[1], R[2], R[3])
+    end
+    if day.secs > 0 then
+      tt:AddDoubleLine("Gold today", string.format("%s in %s", ns.fmtMoney(day.gold), ns.fmtTime(day.secs)), L[1], L[2], L[3], R[1], R[2], R[3])
+    end
   end
   tt:AddLine(" ")
   if st.nextTier then
@@ -234,6 +264,16 @@ local function buildMain()
     main.windows[i] = row
   end
 
+  -- the gold row (/catxp gold): counted time, coin earned and coin per hour for the session.
+  -- layoutMain puts it under the rate windows, or under the status lines when those are hidden.
+  main.gold = {}
+  main.gold.label = label(main, "GameFontHighlightSmall", "TOPLEFT", main, "TOPLEFT", 10, WINDOWS_TOP - 2, 44)
+  main.gold.label:SetText(ns.color("ffd100", "Gold"))
+  main.gold.time  = label(main, "GameFontHighlightSmall", "TOPLEFT", main, "TOPLEFT", 56, WINDOWS_TOP - 2, 44)
+  main.gold.total = label(main, "GameFontHighlightSmall", "TOPLEFT", main, "TOPLEFT", 102, WINDOWS_TOP - 2, 78)
+  main.gold.rate  = label(main, "GameFontHighlightSmall", "TOPLEFT", main, "TOPLEFT", 182, WINDOWS_TOP - 2, MAIN_W - 190)
+  main.gold.x = { label = 10, time = 56, total = 102, rate = 182 }
+
   main.btnStart   = footerButton("Start", 25, function() CatXP:Toggle() end)
   main.btnReset   = footerButton("Reset", 77, function() CatXP:Reset() end)
   main.btnDetails = footerButton("Details", 129, function() ns.ToggleDetails() end)
@@ -266,20 +306,43 @@ local function buildMain()
   main:SetScript("OnLeave", function() GameTooltip:Hide() end)
 end
 
--- Grow or shrink the window for the rate windows and move the buttons under them.
+-- Grow or shrink the window for the rate windows and the gold row, and move the buttons
+-- under them.
 local function layoutMain()
   if not main or not main.windows then return end
   local show = CatXP.settings.windowsShown ~= false
-  local extra = show and WINDOWS_H or 0
+  local gold = CatXP:GoldOn()
+  local extra = (show and WINDOWS_H or 0) + (gold and GOLD_H or 0)
   main:SetHeight(MAIN_H + extra)
   for _, b in ipairs(main.footer or {}) do
     b:ClearAllPoints()
     b:SetPoint("TOPLEFT", main, "TOPLEFT", b.x, BUTTONS_Y - extra)
   end
-  local function setShown(region) if show then region:Show() else region:Hide() end end
-  setShown(main.sep)
+  local function setShown(region, flag) if flag then region:Show() else region:Hide() end end
+  setShown(main.sep, show or gold)
   for _, row in ipairs(main.windows) do
-    for _, part in pairs(row) do setShown(part) end
+    for _, part in pairs(row) do setShown(part, show) end
+  end
+  local goldY = WINDOWS_TOP - 2 - (show and WINDOW_ROWS * ROW_H or 0)
+  for key, x in pairs(main.gold.x) do
+    local part = main.gold[key]
+    part:ClearAllPoints()
+    part:SetPoint("TOPLEFT", main, "TOPLEFT", x, goldY)
+    setShown(part, gold)
+  end
+end
+
+local function fillGold(st)
+  local g = st.gold
+  if not g or not main.gold then return end
+  local row = main.gold
+  row.total:SetText(ns.fmtMoney(g.total))
+  if g.secs < 1 then
+    row.time:SetText(ns.color(GREY, "--"))
+    row.rate:SetText(ns.color(GREY, "--"))
+  else
+    row.time:SetText(ns.fmtTime(g.secs))
+    row.rate:SetText(g.ready and (ns.fmtMoney(g.rate) .. "/h") or ns.color(GREY, "warming"))
   end
 end
 
@@ -344,6 +407,7 @@ function ns.Refresh()
   main.line3:SetText(string.format("Lv %d  %.1f%%  |  %s", st.level, st.pct, kills))
 
   fillWindows(st)
+  fillGold(st)
   main.btnStart.label:SetText(st.running and "Pause" or "Start")
 
   if details and details:IsShown() then ns.RefreshDetails(st) end
@@ -456,6 +520,29 @@ local function buildDetails()
   y = y - 2
   details.avgLine = label(details, "GameFontHighlightSmall", "TOPLEFT", details, "TOPLEFT", 14, y, DETAILS_W - 28)
 
+  -- gold (/catxp gold): four lines under the level table; the panel grows to make room
+  y = y - 20
+  details.goldParts = {}
+  details.goldRows = {}
+  local goldTitle = label(details, "GameFontNormalSmall", "TOPLEFT", details, "TOPLEFT", 10, y)
+  goldTitle:SetText("Gold  " .. ns.color(GREY, "looted coin, quest coin, vendor price of pickups"))
+  table.insert(details.goldParts, goldTitle)
+  y = y - 16
+  local function addGoldRow(key, text)
+    local l = label(details, "GameFontHighlightSmall", "TOPLEFT", details, "TOPLEFT", 14, y, 108)
+    l:SetText(text)
+    l:SetTextColor(0.7, 0.7, 0.7)
+    local v = label(details, "GameFontHighlightSmall", "TOPLEFT", details, "TOPLEFT", 124, y, DETAILS_W - 134)
+    details.goldRows[key] = v
+    table.insert(details.goldParts, l)
+    table.insert(details.goldParts, v)
+    y = y - 14
+  end
+  addGoldRow("rate", "Gold / hour")
+  addGoldRow("sources", "Coin / quests / items")
+  addGoldRow("recent", "Last 15 min / hour")
+  addGoldRow("spans", "This level / today")
+
   -- buttons
   local function button(text, x, w, onClick)
     local b = CreateFrame("Button", nil, details, "UIPanelButtonTemplate")
@@ -470,6 +557,22 @@ local function buildDetails()
   details.btnGraphs = button("Graphs", 138, 62, function() ns.ToggleGraphs() end)
   details.btnLock   = button("Lock", 204, 56, function() toggleSetting("locked") end)
   details.btnClear  = button("Clear", 264, 66, function() StaticPopup_Show("CATXP_CLEAR_HISTORY") end)
+end
+
+-- The details panel is taller while gold is tracked; the buttons hang from its bottom edge.
+local function layoutDetails()
+  if not details or not details.goldParts then return end
+  local gold = CatXP:GoldOn()
+  details:SetHeight(DETAILS_H + (gold and DETAILS_GOLD_H or 0))
+  for _, part in ipairs(details.goldParts) do
+    if gold then part:Show() else part:Hide() end
+  end
+end
+
+local function goldRateText(w)
+  if not w or w.secs < 1 then return ns.color(GREY, "--") end
+  if not w.ready then return ns.color(GREY, "warming") end
+  return ns.fmtMoney(w.rate) .. "/h"
 end
 
 function ns.UpdateChart()
@@ -568,6 +671,20 @@ function ns.RefreshDetails(st)
     details.avgLine:SetText(ns.color(GREY, "No finished levels tracked yet. Averages appear after a level-up."))
   end
 
+  local g = st.gold
+  if g and details.goldRows then
+    local G = details.goldRows
+    if g.secs < 1 then
+      G.rate:SetText(ns.color(GREY, "nothing counted yet"))
+    else
+      G.rate:SetText(string.format("%s  (%s in %s)", g.ready and (ns.fmtMoney(g.rate) .. "/h") or ns.color(GREY, "warming up"),
+        ns.fmtMoney(g.total), ns.fmtTime(g.secs)))
+    end
+    G.sources:SetText(string.format("%s  /  %s  /  %s", ns.fmtMoney(g.loot), ns.fmtMoney(g.quest), ns.fmtMoney(g.items)))
+    G.recent:SetText(goldRateText(g.windows[1]) .. "  /  " .. goldRateText(g.windows[2]))
+    G.spans:SetText(goldRateText(g.windows[4]) .. "  /  " .. goldRateText(g.windows[5]))
+  end
+
   details.btnToggle:SetText(st.running and "Pause" or "Start")
   details.btnLock:SetText(CatXP.settings.locked and "Unlock" or "Lock")
 end
@@ -595,6 +712,7 @@ function ns.ApplySettings()
   details:SetScale(S.scale or 1)
   applyPosition()
   layoutMain()
+  layoutDetails()
   if S.shown then
     main:Show()
   else
